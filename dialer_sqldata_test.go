@@ -1082,3 +1082,84 @@ func TestDialerWithSqlData_ResourceExhaustedBackoff(t *testing.T) {
 		t.Errorf("expected cooldownUntil to be cleared (zero time), got: %v", cooldownUntil)
 	}
 }
+
+func TestDialerWithConnectTunnel_NoFallbackOnPreconditionFailed(t *testing.T) {
+	handler := func(stream sqlpb.SqlDataService_StreamSqlDataServer) error {
+		if _, err := stream.Recv(); err != nil {
+			return err
+		}
+		return status.Error(codes.FailedPrecondition, "Instance does not allow connect tunnel.")
+	}
+	addr, cleanup := startMockServer(t, handler)
+	defer cleanup()
+
+	ctx := context.Background()
+	d, err := NewDialer(ctx,
+		WithTokenSource(mock.EmptyTokenSource{}),
+		WithSQLDataDialer(sqldataclient.NewGrpcDialer(addr, nil, "", nullLogger{}, true, 45*time.Minute, "")),
+	)
+	if err != nil {
+		t.Fatalf("NewDialer failed: %v", err)
+	}
+	defer d.Close()
+
+	conn, err := d.Dial(ctx, "proj:reg:inst", WithConnectTunnel())
+	if err == nil {
+		defer conn.Close()
+		_, err = conn.Read(make([]byte, 1))
+	}
+	if err == nil {
+		t.Fatal("expected error from FailedPrecondition without fallback, got nil")
+	}
+	if status.Code(err) != codes.FailedPrecondition {
+		t.Errorf("got error code %v (%v), want %v", status.Code(err), err, codes.FailedPrecondition)
+	}
+	if !strings.Contains(err.Error(), "Instance does not allow connect tunnel.") {
+		t.Errorf("got error %v, want to contain 'Instance does not allow connect tunnel.'", err)
+	}
+}
+
+func TestDialerAdminAPIEndpointDerivesSQLDataEndpoint(t *testing.T) {
+	tcs := []struct {
+		desc         string
+		opts         []Option
+		wantEndpoint string
+	}{
+		{
+			desc:         "default endpoint when neither Admin API nor SQLData endpoint set",
+			opts:         []Option{WithTokenSource(mock.EmptyTokenSource{})},
+			wantEndpoint: "sqladmin.googleapis.com:443",
+		},
+		{
+			desc: "derived from WithAdminAPIEndpoint URL",
+			opts: []Option{
+				WithTokenSource(mock.EmptyTokenSource{}),
+				WithAdminAPIEndpoint("https://coreltest-sqladmin.sandbox.googleapis.com/"),
+			},
+			wantEndpoint: "coreltest-sqladmin.sandbox.googleapis.com:443",
+		},
+		{
+			desc: "explicit WithSQLDataEndpoint takes precedence over WithAdminAPIEndpoint",
+			opts: []Option{
+				WithTokenSource(mock.EmptyTokenSource{}),
+				WithAdminAPIEndpoint("https://coreltest-sqladmin.sandbox.googleapis.com/"),
+				WithSQLDataEndpoint("custom-sqldata.googleapis.com:443"),
+			},
+			wantEndpoint: "custom-sqldata.googleapis.com:443",
+		},
+	}
+
+	for _, tc := range tcs {
+		t.Run(tc.desc, func(t *testing.T) {
+			d, err := NewDialer(context.Background(), tc.opts...)
+			if err != nil {
+				t.Fatalf("NewDialer failed: %v", err)
+			}
+			defer d.Close()
+			if d.sqlDataEndpoint != tc.wantEndpoint {
+				t.Errorf("d.sqlDataEndpoint = %q, want %q", d.sqlDataEndpoint, tc.wantEndpoint)
+			}
+		})
+	}
+}
+

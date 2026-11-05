@@ -27,6 +27,7 @@ import (
 	mathrand "math/rand"
 	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"slices"
 	"strings"
@@ -245,6 +246,17 @@ func NewDialer(ctx context.Context, opts ...Option) (*Dialer, error) {
 			return nil, cfg.err
 		}
 	}
+	if cfg.setAdminAPIEndpoint && !cfg.setSQLDataEndpoint && cfg.adminAPIEndpoint != "" {
+		if u, err := url.Parse(cfg.adminAPIEndpoint); err == nil && u.Hostname() != "" {
+			cfg.sqlDataEndpoint = net.JoinHostPort(u.Hostname(), "443")
+		} else if host := strings.TrimRight(cfg.adminAPIEndpoint, "/"); host != "" && !strings.Contains(host, "/") {
+			if _, _, err := net.SplitHostPort(host); err == nil {
+				cfg.sqlDataEndpoint = host
+			} else {
+				cfg.sqlDataEndpoint = net.JoinHostPort(host, "443")
+			}
+		}
+	}
 	if cfg.useIAMAuthN && cfg.setTokenSource && !cfg.setIAMAuthNTokenSource {
 		return nil, errUseIAMTokenSource
 	}
@@ -416,6 +428,32 @@ func (d *Dialer) Dial(ctx context.Context, icn string, opts ...DialOption) (conn
 
 	// When using NoIP connections, there is no need to retrieve connection
 	// info and instead we may proceed immediately to connecting.
+	if cfg.connectionType == cloudsql.ConnectTunnel {
+		key := createKey(cn)
+		d.lock.RLock()
+		state, ok := d.sqlDataConnState[key]
+		d.lock.RUnlock()
+		if !ok {
+			d.lock.Lock()
+			state, ok = d.sqlDataConnState[key]
+			if !ok {
+				state = &sqlDataConnState{allowed: true}
+				d.sqlDataConnState[key] = state
+			}
+			d.lock.Unlock()
+		}
+
+		state.mu.Lock()
+		cooldownUntil := state.cooldownUntil
+		lastErr := state.lastErr
+		state.mu.Unlock()
+
+		if time.Now().Before(cooldownUntil) {
+			return nil, errtype.NewResourceExhaustedError("cooldown active", cn.String(), lastErr)
+		}
+
+		return d.connectSQLDataService(ctx, cn, cfg, startTime)
+	}
 	if cfg.connectionType == cloudsql.SQLData {
 		key := createKey(cn)
 		d.lock.RLock()
@@ -506,6 +544,14 @@ func (d *Dialer) connectSQLDataService(ctx context.Context, cn instance.ConnName
 			onResourceExhausted(err)
 		}
 		return nil, err
+	}
+
+	if cfg.connectionType == cloudsql.ConnectTunnel {
+		return &resourceExhaustedTrackingConn{
+			Conn:                conn,
+			onResourceExhausted: onResourceExhausted,
+			onSuccess:           onSuccess,
+		}, nil
 	}
 
 	// This creates a fallback connection, and marks the connection

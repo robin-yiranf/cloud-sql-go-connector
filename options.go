@@ -47,7 +47,9 @@ type dialerConfig struct {
 	useIAMAuthN                     bool
 	logger                          debug.ContextLogger
 	lazyRefresh                     bool
+	adminAPIEndpoint                string
 	sqlDataEndpoint                 string
+	setSQLDataEndpoint              bool
 	clientUniverseDomain            string
 	quotaProject                    string
 	authCredentials                 *auth.Credentials
@@ -269,6 +271,7 @@ func WithAdminAPIEndpoint(url string) Option {
 	return func(d *dialerConfig) {
 		d.sqladminOpts = append(d.sqladminOpts, apiopt.WithEndpoint(url))
 		d.setAdminAPIEndpoint = true
+		d.adminAPIEndpoint = url
 	}
 }
 
@@ -414,6 +417,7 @@ func WithLazyRefresh() Option {
 func WithSQLDataEndpoint(endpoint string) Option {
 	return func(d *dialerConfig) {
 		d.sqlDataEndpoint = endpoint
+		d.setSQLDataEndpoint = true
 	}
 }
 
@@ -499,6 +503,14 @@ func WithAutoIP() DialOption {
 func WithSQLData() DialOption {
 	return func(cfg *dialConfig) {
 		cfg.connectionType = cloudsql.SQLData
+	}
+}
+
+// WithConnectTunnel returns a DialOption that routes traffic through the SQL Data API
+// endpoint without falling back to direct IP connections if the backend fails.
+func WithConnectTunnel() DialOption {
+	return func(cfg *dialConfig) {
+		cfg.connectionType = cloudsql.ConnectTunnel
 	}
 }
 

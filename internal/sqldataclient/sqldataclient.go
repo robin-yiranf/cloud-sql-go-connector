@@ -181,9 +181,7 @@ func (d *GrpcDialer) ConnectSQLDataService(ctx context.Context, cn instance.Conn
 	instanceID := fmt.Sprintf("projects/%s/instances/%s", cn.Project(), cn.Name())
 	streamCtx = metadata.AppendToOutgoingContext(streamCtx,
 		"x-goog-request-params", fmt.Sprintf("location_id=locations/%s&instance_id=%s", cn.Region(), instanceID))
-
-	// If quota-project cli flag is set, add the request header.
-	if d.quotaProject != "" {
+	if d.quotaProject != "" && (d.useInsecure || d.tokenProvider != nil) {
 		streamCtx = metadata.AppendToOutgoingContext(streamCtx, "x-goog-user-project", d.quotaProject)
 	}
 
